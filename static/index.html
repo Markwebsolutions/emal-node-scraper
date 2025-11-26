@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Scraper Dashboard</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<h2>Scraper Dashboard</h2>
+
+<div>
+    <h3>Upload Service Account JSON</h3>
+    <input type="file" id="jsonFile" />
+    <button onclick="uploadJSON()">Upload</button>
+</div>
+
+<div>
+    <h3>Sheet ID</h3>
+    <input type="text" id="sheetId" placeholder="Enter Google Sheet ID">
+    <button onclick="saveSheetID()">Save</button>
+</div>
+
+<hr>
+
+<button onclick="runWebsiteScraper()">Run Website Scraper</button>
+<button onclick="runFacebookScraper()">Run Facebook Scraper</button>
+<button onclick="runEmailFilter()">Run Email Filter</button>
+
+<h3>Logs</h3>
+<pre id="terminal"></pre>
+
+<script src="script.js"></script>
+</body>
+</html>
