@@ -8,15 +8,17 @@ const path = require("path");
 const fs = require("fs");
 
 puppeteerExtra.use(stealth());
+
+// CLI arguments
 const argv = minimist(process.argv.slice(2));
 
-// Paths
 const SERVICE_JSON = argv.key
     ? path.resolve(argv.key)
     : path.join(__dirname, "service_account.json");
 
 const SPREADSHEET_ID = argv.sheet;
 
+// validations
 console.log("Using SERVICE_JSON:", SERVICE_JSON);
 console.log("Using SPREADSHEET_ID:", SPREADSHEET_ID);
 
@@ -29,9 +31,9 @@ if (!fs.existsSync(SERVICE_JSON)) {
     process.exit(1);
 }
 
-// -----------------------------------------
-// GOOGLE SHEETS
-// -----------------------------------------
+// ======================================================================
+// GOOGLE SHEETS AUTH
+// ======================================================================
 async function getSheets() {
     const auth = new google.auth.GoogleAuth({
         keyFile: SERVICE_JSON,
@@ -41,7 +43,9 @@ async function getSheets() {
     return google.sheets({ version: "v4", auth: client });
 }
 
-// Load sheet rows
+// ======================================================================
+// READ SHEET (Facebook Link + Business Email + Business Name)
+// ======================================================================
 async function getFacebookLinks() {
     const sheets = await getSheets();
 
@@ -51,7 +55,7 @@ async function getFacebookLinks() {
     });
 
     const rows = res.data.values || [];
-    if (!rows.length) throw "Spreadsheet empty";
+    if (!rows.length) throw "Spreadsheet is empty";
 
     const header = rows[0];
 
@@ -59,156 +63,137 @@ async function getFacebookLinks() {
     const emailIndex = header.indexOf("Business Email");
     const nameIndex = header.indexOf("Business Name");
 
-    if (fbIndex === -1 || emailIndex === -1 || nameIndex === -1)
-        throw "❌ Required columns missing: Facebook Link, Business Email, Business Name";
+    if (fbIndex === -1) throw "❌ Column 'Facebook Link' missing.";
+    if (emailIndex === -1) throw "❌ Column 'Business Email' missing.";
+    if (nameIndex === -1) throw "❌ Column 'Business Name' missing.";
 
     let list = [];
     for (let i = 1; i < rows.length; i++) {
         const fb = rows[i][fbIndex];
-        const name = rows[i][nameIndex] || "Unknown Business";
-
         if (fb && fb.trim() !== "") {
             list.push({
                 row: i + 1,
                 url: fb.trim(),
-                name,
+                name: rows[i][nameIndex] || "Unknown Business",
             });
         }
     }
 
-    console.log(`📌 Total Facebook URLs Found: ${list.length}`);
-    return { list, fbIndex, emailIndex };
+    console.log(`📌 URLs Loaded: ${list.length}`);
+    return { list, emailIndex };
 }
 
-// -----------------------------------------
-// EMAIL EXTRACTOR
-// -----------------------------------------
+// ======================================================================
+// EMAIL REGEX (same as your simple script)
+// ======================================================================
 function extractEmail(text) {
-    const regex = /mailto:([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/i;
+    const regex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
     const found = text.match(regex);
-    return found ? found[1] : "";
+    return found ? found[0] : "";
 }
 
-// -----------------------------------------
-// Utility: Convert column number → A, B, C...
-// -----------------------------------------
-function colLetter(n) {
-    let s = "";
-    while (n > 0) {
-        let mod = (n - 1) % 26;
-        s = String.fromCharCode(65 + mod) + s;
-        n = Math.floor((n - mod) / 26);
+// ======================================================================
+// COLUMN LETTER UTILITY
+// ======================================================================
+function columnLetter(colNumber) {
+    let temp = "";
+    let letter = "";
+    while (colNumber > 0) {
+        temp = (colNumber - 1) % 26;
+        letter = String.fromCharCode(temp + 65) + letter;
+        colNumber = (colNumber - temp - 1) / 26;
     }
-    return s;
+    return letter;
 }
 
-// -----------------------------------------
-// BATCH WRITER (Option A)
-// -----------------------------------------
-let pendingUpdates = [];
-const BATCH_SIZE = 10;  // write every 10 rows
-
-async function flushBatch(emailIndex, fbIndex) {
-    if (pendingUpdates.length === 0) return;
-
+// ======================================================================
+// DIRECT WRITE — EXACT same behaviour as your simple script
+// ======================================================================
+async function writeEmailToSheet(row, email, emailIndex) {
     const sheets = await getSheets();
+    const col = columnLetter(emailIndex + 1);
 
-    const data = pendingUpdates.map((item) => ({
-        range: `Sheet1!${colLetter(item.colIndex + 1)}${item.row}`,
-        values: [[item.value]],
-    }));
-
-    await sheets.spreadsheets.values.batchUpdate({
+    await sheets.spreadsheets.values.update({
         spreadsheetId: SPREADSHEET_ID,
-        requestBody: {
-            valueInputOption: "RAW",
-            data,
-        },
+        range: `Sheet1!${col}${row}`,
+        valueInputOption: "RAW",
+        requestBody: { values: [[email]] },
     });
 
-    console.log(`📝 Batch update done → ${pendingUpdates.length} rows\n`);
-
-    pendingUpdates = [];
+    console.log(`✅ Saved Business Email (Row ${row}): ${email}`);
 }
 
-async function queueWrite(row, colIndex, value, emailIndex, fbIndex) {
-    pendingUpdates.push({ row, colIndex, value });
-
-    if (pendingUpdates.length >= BATCH_SIZE) {
-        await flushBatch(emailIndex, fbIndex);
-    }
-}
-
-// -----------------------------------------
+// ======================================================================
 // SCRAPER
-// -----------------------------------------
+// ======================================================================
 async function scrapeFacebookEmail(url, browser) {
     try {
         const page = await browser.newPage();
-
         await page.setUserAgent(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/122 Safari/537.36"
         );
 
-        console.log(`🌐 Visiting → ${url}`);
+        console.log(`🌐 Visiting: ${url}`);
+        await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
 
-        await page.goto(url, {
-            waitUntil: "networkidle2",
-            timeout: 45000,
-        });
+        await new Promise(res => setTimeout(res, 4000));
 
-        await new Promise((r) => setTimeout(r, 3000));
-
-        const html = await page.content();
+        const HTML = await page.content();
         await page.close();
 
-        return extractEmail(html);
+        return extractEmail(HTML);
 
     } catch (err) {
-        console.log("❌ Scrape error:", err.message);
+        console.log(`❌ Scrape error: ${err.message}`);
         return "";
     }
 }
 
-// -----------------------------------------
-// MAIN
-// -----------------------------------------
+// ======================================================================
+// MAIN — EXACT behaviour of your simple script
+// ======================================================================
 (async () => {
-    console.log("🚀 Facebook Email Scraper Started (Batch Mode)");
+    console.log("🚀 Starting Facebook Email Scraper…");
 
-    const { list, fbIndex, emailIndex } = await getFacebookLinks();
+    const { list, emailIndex } = await getFacebookLinks();
 
     const browser = await puppeteerExtra.launch({
         headless: true,
-        executablePath:
-            process.env.PUPPETEER_EXECUTABLE_PATH || puppeteer.executablePath(),
-        args: ["--no-sandbox", "--disable-dev-shm-usage"],
+        executablePath: puppeteer.executablePath(),
+        args: [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-blink-features=AutomationControlled"
+        ],
     });
 
-    const limit = pLimit(5);
+    const limit = pLimit(7);
 
-    const tasks = list.map((item) =>
+    const tasks = list.map(item =>
         limit(async () => {
-            console.log(`\n🔍 Business: ${item.name}`);
-            console.log(`📄 Row: ${item.row}`);
+            console.log(`\n🔹 Business: ${item.name}`);
+            console.log(`🔎 Row ${item.row}: ${item.url}`);
 
             const email = await scrapeFacebookEmail(item.url, browser);
 
             if (email) {
-                console.log(`📧 Email Found → ${email}`);
-                await queueWrite(item.row, emailIndex, email, emailIndex, fbIndex);
+                console.log(`📧 Found: ${email}`);
             } else {
-                console.log(`❌ No email found → Storing FB link`);
-                await queueWrite(item.row, fbIndex, item.url, emailIndex, fbIndex);
+                console.log("❌ No email found");
             }
+
+            await writeEmailToSheet(item.row, email, emailIndex);
+
+            await new Promise(res =>
+                setTimeout(res, 2000 + Math.random() * 4000)
+            );
         })
     );
 
     await Promise.all(tasks);
 
-    // write remaining rows
-    await flushBatch(emailIndex, fbIndex);
-
     await browser.close();
-    console.log("\n🎉 COMPLETE — Batch updates finished!");
+    console.log("\n🎉 DONE — Emails Updated Row-by-Row (no batch, exact behaviour).");
 })();
