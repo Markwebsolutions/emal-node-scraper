@@ -217,3 +217,5 @@ async function scrapeFacebookEmail(url, browser) {
     await browser.close();
     console.log("\n🎉 DONE — All emails updated in batch!");
 })();
+
+
