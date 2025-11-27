@@ -1,35 +1,20 @@
+// ======================================================================
+// IMPORTS
+// ======================================================================
 const puppeteerExtra = require("puppeteer-extra");
 const stealth = require("puppeteer-extra-plugin-stealth");
 const puppeteer = require("puppeteer");
 const { google } = require("googleapis");
 const pLimit = require("p-limit").default;
-const minimist = require("minimist");
-const path = require("path");
-const fs = require("fs");
+const argv = require("minimist")(process.argv.slice(2));
 
 puppeteerExtra.use(stealth());
 
-// CLI arguments
-const argv = minimist(process.argv.slice(2));
-
-const SERVICE_JSON = argv.key
-    ? path.resolve(argv.key)
-    : path.join(__dirname, "service_account.json");
-
-const SPREADSHEET_ID = argv.sheet;
-
-// validations
-console.log("Using SERVICE_JSON:", SERVICE_JSON);
-console.log("Using SPREADSHEET_ID:", SPREADSHEET_ID);
-
-if (!SPREADSHEET_ID) {
-    console.error("❌ Missing --sheet parameter");
-    process.exit(1);
-}
-if (!fs.existsSync(SERVICE_JSON)) {
-    console.error("❌ service_account.json NOT found:", SERVICE_JSON);
-    process.exit(1);
-}
+// ======================================================================
+// ARGS
+// ======================================================================
+const SERVICE_JSON = argv.key || "service_account.json";
+const SPREADSHEET_ID = argv.sheet || "";
 
 // ======================================================================
 // GOOGLE SHEETS AUTH
@@ -37,54 +22,41 @@ if (!fs.existsSync(SERVICE_JSON)) {
 async function getSheets() {
     const auth = new google.auth.GoogleAuth({
         keyFile: SERVICE_JSON,
-        scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+        scopes: ["https://www.googleapis.com/auth/spreadsheets"]
     });
     const client = await auth.getClient();
     return google.sheets({ version: "v4", auth: client });
 }
 
 // ======================================================================
-// READ SHEET (Facebook Link + Business Email + Business Name)
+// READ FACEBOOK LINKS
 // ======================================================================
 async function getFacebookLinks() {
     const sheets = await getSheets();
-
     const res = await sheets.spreadsheets.values.get({
         spreadsheetId: SPREADSHEET_ID,
-        range: "Sheet1!A1:Z9999",
+        range: "Sheet1!A1:Z5000",
     });
 
-    const rows = res.data.values || [];
-    if (!rows.length) throw "Spreadsheet is empty";
-
+    const rows = res.data.values;
     const header = rows[0];
-
     const fbIndex = header.indexOf("Facebook Link");
     const emailIndex = header.indexOf("Business Email");
-    const nameIndex = header.indexOf("Business Name");
 
-    if (fbIndex === -1) throw "❌ Column 'Facebook Link' missing.";
-    if (emailIndex === -1) throw "❌ Column 'Business Email' missing.";
-    if (nameIndex === -1) throw "❌ Column 'Business Name' missing.";
+    if (fbIndex === -1) throw new Error("Column 'Facebook Link' not found");
+    if (emailIndex === -1) throw new Error("Column 'Business Email' not found");
 
-    let list = [];
+    const urls = [];
     for (let i = 1; i < rows.length; i++) {
-        const fb = rows[i][fbIndex];
-        if (fb && fb.trim() !== "") {
-            list.push({
-                row: i + 1,
-                url: fb.trim(),
-                name: rows[i][nameIndex] || "Unknown Business",
-            });
-        }
+        const fbLink = rows[i][fbIndex];
+        if (fbLink && fbLink.trim() !== "") urls.push({ row: i + 1, url: fbLink });
     }
-
-    console.log(`📌 URLs Loaded: ${list.length}`);
-    return { list, emailIndex };
+    console.log(`Loaded ${urls.length} Facebook links`);
+    return { urls, emailIndex };
 }
 
 // ======================================================================
-// EMAIL REGEX (same as your simple script)
+// EMAIL REGEX
 // ======================================================================
 function extractEmail(text) {
     const regex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
@@ -93,9 +65,31 @@ function extractEmail(text) {
 }
 
 // ======================================================================
-// COLUMN LETTER UTILITY
+// SCRAPE FACEBOOK
 // ======================================================================
-function columnLetter(colNumber) {
+async function scrapeFacebookEmail(url, browser) {
+    try {
+        const page = await browser.newPage();
+        await page.setUserAgent(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
+        );
+        console.log(`Visiting: ${url}`);
+        await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
+        await new Promise(res => setTimeout(res, 4000));
+        const content = await page.content();
+        const email = extractEmail(content);
+        await page.close();
+        return email;
+    } catch (err) {
+        console.log(`Error scraping ${url}: ${err.message}`);
+        return "";
+    }
+}
+
+// ======================================================================
+// COLUMN LETTER FUNCTION
+// ======================================================================
+function getColumnLetter(colNumber) {
     let temp = "";
     let letter = "";
     while (colNumber > 0) {
@@ -107,115 +101,54 @@ function columnLetter(colNumber) {
 }
 
 // ======================================================================
-// DIRECT WRITE — EXACT same behaviour as your simple script
+// WRITE EMAIL TO SHEET
 // ======================================================================
 async function writeEmailToSheet(row, email, emailIndex) {
     const sheets = await getSheets();
-    const col = columnLetter(emailIndex + 1);
+    const columnLetter = getColumnLetter(emailIndex + 1);
 
     await sheets.spreadsheets.values.update({
         spreadsheetId: SPREADSHEET_ID,
-        range: `Sheet1!${col}${row}`,
+        range: `Sheet1!${columnLetter}${row}`,
         valueInputOption: "RAW",
-        requestBody: { values: [[email]] },
+        requestBody: { values: [[email]] }
     });
 
-    console.log(`✅ Saved Business Email (Row ${row}): ${email}`);
+    console.log(`Saved to row ${row}: ${email}`);
 }
 
 // ======================================================================
-// SCRAPER
+// MAIN
 // ======================================================================
-async function scrapeFacebookEmail(url, browser) {
-    try {
-        const page = await browser.newPage();
-        await page.setUserAgent(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-            "(KHTML, like Gecko) Chrome/122 Safari/537.36"
-        );
-
-        console.log(`🌐 Visiting: ${url}`);
-        await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
-
-        await new Promise(res => setTimeout(res, 4000));
-
-        const HTML = await page.content();
-        await page.close();
-
-        return extractEmail(HTML);
-
-    } catch (err) {
-        console.log(`❌ Scrape error: ${err.message}`);
-        return "";
+async function main() {
+    if (!SPREADSHEET_ID) {
+        console.log("No spreadsheet ID provided. Use --sheet=ID");
+        return;
     }
-}
 
-// ======================================================================
-// MAIN — Scrape then batch update
-// ======================================================================
-(async () => {
-    console.log("🚀 Starting Facebook Email Scraper…");
-
-    const { list, emailIndex } = await getFacebookLinks();
+    const { urls, emailIndex } = await getFacebookLinks();
 
     const browser = await puppeteerExtra.launch({
         headless: true,
         executablePath: puppeteer.executablePath(),
-        args: [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-blink-features=AutomationControlled"
-        ],
+        args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-blink-features=AutomationControlled"]
     });
 
     const limit = pLimit(7);
-
-    // Store emails to write at the end
-    const emailResults = [];
-
-    const tasks = list.map(item =>
+    const tasks = urls.map(entry =>
         limit(async () => {
-            console.log(`\n🔹 Business: ${item.name}`);
-            console.log(`🔎 Row ${item.row}: ${item.url}`);
-
-            const email = await scrapeFacebookEmail(item.url, browser);
-
-            if (email) {
-                console.log(`📧 Found: ${email}`);
-            } else {
-                console.log("❌ No email found");
-            }
-
-            // Push to results array
-            emailResults.push({ row: item.row, email });
-
-            await new Promise(res =>
-                setTimeout(res, 2000 + Math.random() * 4000)
-            );
+            console.log(`Scraping row ${entry.row}: ${entry.url}`);
+            const email = await scrapeFacebookEmail(entry.url, browser);
+            if (email) console.log(`Found email: ${email}`);
+            else console.log("No email found");
+            await writeEmailToSheet(entry.row, email, emailIndex);
+            await new Promise(res => setTimeout(res, 2000 + Math.random() * 4000));
         })
     );
 
     await Promise.all(tasks);
-
-    // BATCH UPDATE TO SHEET
-    if (emailResults.length) {
-        const sheets = await getSheets();
-
-        for (const item of emailResults) {
-            const col = columnLetter(emailIndex + 1);
-            await sheets.spreadsheets.values.update({
-                spreadsheetId: SPREADSHEET_ID,
-                range: `Sheet1!${col}${item.row}`,
-                valueInputOption: "RAW",
-                requestBody: { values: [[item.email]] },
-            });
-            console.log(`✅ Saved Business Email (Row ${item.row}): ${item.email}`);
-        }
-    }
-
     await browser.close();
-    console.log("\n🎉 DONE — All emails updated in batch!");
-})();
+    console.log("Done!");
+}
 
-
+main();
