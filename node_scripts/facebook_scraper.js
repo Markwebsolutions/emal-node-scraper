@@ -10,6 +10,7 @@ const fs = require("fs");
 puppeteerExtra.use(stealth());
 const argv = minimist(process.argv.slice(2));
 
+// Paths
 const SERVICE_JSON = argv.key
     ? path.resolve(argv.key)
     : path.join(__dirname, "service_account.json");
@@ -40,6 +41,7 @@ async function getSheets() {
     return google.sheets({ version: "v4", auth: client });
 }
 
+// Load sheet rows
 async function getFacebookLinks() {
     const sheets = await getSheets();
 
@@ -79,14 +81,16 @@ async function getFacebookLinks() {
 }
 
 // -----------------------------------------
-// EMAIL EXTRACTION (OLD VERSION — BEST!)
+// EMAIL EXTRACTOR
 // -----------------------------------------
 function extractEmail(text) {
-    const regex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+    const regex = /mailto:([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/i;
     const found = text.match(regex);
-    return found ? found[0] : "";
+    return found ? found[1] : "";
 }
 
+// -----------------------------------------
+// Utility: Convert column number → A, B, C...
 // -----------------------------------------
 function colLetter(n) {
     let s = "";
@@ -98,18 +102,41 @@ function colLetter(n) {
     return s;
 }
 
-async function writeSingleCell(row, colIndex, value) {
-    const sheets = await getSheets();
-    const col = colLetter(colIndex + 1);
+// -----------------------------------------
+// BATCH WRITER (Option A)
+// -----------------------------------------
+let pendingUpdates = [];
+const BATCH_SIZE = 10;  // write every 10 rows
 
-    await sheets.spreadsheets.values.update({
+async function flushBatch(emailIndex, fbIndex) {
+    if (pendingUpdates.length === 0) return;
+
+    const sheets = await getSheets();
+
+    const data = pendingUpdates.map((item) => ({
+        range: `Sheet1!${colLetter(item.colIndex + 1)}${item.row}`,
+        values: [[item.value]],
+    }));
+
+    await sheets.spreadsheets.values.batchUpdate({
         spreadsheetId: SPREADSHEET_ID,
-        range: `Sheet1!${col}${row}`,
-        valueInputOption: "RAW",
-        requestBody: { values: [[value]] },
+        requestBody: {
+            valueInputOption: "RAW",
+            data,
+        },
     });
 
-    console.log(`📝 Updated Row ${row} → Col ${col} = ${value}`);
+    console.log(`📝 Batch update done → ${pendingUpdates.length} rows\n`);
+
+    pendingUpdates = [];
+}
+
+async function queueWrite(row, colIndex, value, emailIndex, fbIndex) {
+    pendingUpdates.push({ row, colIndex, value });
+
+    if (pendingUpdates.length >= BATCH_SIZE) {
+        await flushBatch(emailIndex, fbIndex);
+    }
 }
 
 // -----------------------------------------
@@ -123,14 +150,14 @@ async function scrapeFacebookEmail(url, browser) {
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
         );
 
-        console.log(`🌐 Visiting: ${url}`);
+        console.log(`🌐 Visiting → ${url}`);
 
         await page.goto(url, {
             waitUntil: "networkidle2",
             timeout: 45000,
         });
 
-        await new Promise(res => setTimeout(res, 3000));
+        await new Promise((r) => setTimeout(r, 3000));
 
         const html = await page.content();
         await page.close();
@@ -147,7 +174,7 @@ async function scrapeFacebookEmail(url, browser) {
 // MAIN
 // -----------------------------------------
 (async () => {
-    console.log("🚀 Facebook Email Scraper Started");
+    console.log("🚀 Facebook Email Scraper Started (Batch Mode)");
 
     const { list, fbIndex, emailIndex } = await getFacebookLinks();
 
@@ -158,9 +185,9 @@ async function scrapeFacebookEmail(url, browser) {
         args: ["--no-sandbox", "--disable-dev-shm-usage"],
     });
 
-    const limit = pLimit(5); // parallel tasks
+    const limit = pLimit(5);
 
-    const tasks = list.map(item =>
+    const tasks = list.map((item) =>
         limit(async () => {
             console.log(`\n🔍 Business: ${item.name}`);
             console.log(`📄 Row: ${item.row}`);
@@ -169,16 +196,19 @@ async function scrapeFacebookEmail(url, browser) {
 
             if (email) {
                 console.log(`📧 Email Found → ${email}`);
-                await writeSingleCell(item.row, emailIndex, email);
+                await queueWrite(item.row, emailIndex, email, emailIndex, fbIndex);
             } else {
-                console.log(`❌ No email found`);
-                await writeSingleCell(item.row, fbIndex, item.url);
+                console.log(`❌ No email found → Storing FB link`);
+                await queueWrite(item.row, fbIndex, item.url, emailIndex, fbIndex);
             }
         })
     );
 
     await Promise.all(tasks);
 
+    // write remaining rows
+    await flushBatch(emailIndex, fbIndex);
+
     await browser.close();
-    console.log("\n🎉 COMPLETE — Live sheet updates done!");
+    console.log("\n🎉 COMPLETE — Batch updates finished!");
 })();
