@@ -1,181 +1,177 @@
+const SERVICE_JSON = argv.key || "service_account.json";
+const SPREADSHEET_ID = argv.sheet || "";
+
+// ======================================================================
+// IMPORTS
+// ======================================================================
 const puppeteerExtra = require("puppeteer-extra");
 const stealth = require("puppeteer-extra-plugin-stealth");
 const puppeteer = require("puppeteer");
 const { google } = require("googleapis");
-const pLimit = require("p-limit").default;
-const argv = require("minimist")(process.argv.slice(2));
+const pLimit = require("p-limit").default;   // ⭐ FIXED — correct import
 
 puppeteerExtra.use(stealth());
-
-// ======================================================================
-// ARGS
-// ======================================================================
-const SERVICE_JSON = argv.key || "service_account.json";
-const SPREADSHEET_ID = argv.sheet || "";
 
 // ======================================================================
 // GOOGLE SHEETS AUTH
 // ======================================================================
 async function getSheets() {
-const auth = new google.auth.GoogleAuth({
-keyFile: SERVICE_JSON,
-scopes: ["https://www.googleapis.com/auth/spreadsheets"]
-});
-const client = await auth.getClient();
-return google.sheets({ version: "v4", auth: client });
+    const auth = new google.auth.GoogleAuth({
+        keyFile: argv.key || "service_account.json",
+        scopes: ["https://www.googleapis.com/auth/spreadsheets"]
+    });
+
+    const client = await auth.getClient();
+    return google.sheets({ version: "v4", auth: client });
 }
 
+
 // ======================================================================
-// READ FACEBOOK LINKS
+// READ FACEBOOK LINKS FROM SHEET
 // ======================================================================
 async function getFacebookLinks() {
     const sheets = await getSheets();
+
     const res = await sheets.spreadsheets.values.get({
         spreadsheetId: SPREADSHEET_ID,
-        range: "Sheet1!A1:Z5000", // Fetch enough rows and columns
+        range: "Sheet1!A1:Z5000",
     });
+
     const rows = res.data.values;
-    if (!rows || rows.length === 0) throw new Error("No data found in sheet");
+    const header = rows[0];
 
-    // Normalize headers: trim spaces and lowercase
-    const header = rows[0].map(h => h.trim().toLowerCase());
-    const fbIndex = header.indexOf("facebook link");
-    const emailIndex = header.indexOf("business email");
+    const fbIndex = header.indexOf("Facebook Link");
+    const emailIndex = header.indexOf("Business Email");
 
-    if (fbIndex === -1) throw new Error("Column 'Facebook Link' not found");
-    if (emailIndex === -1) throw new Error("Column 'Business Email' not found");
+    if (fbIndex === -1) throw new Error("❌ Column 'Facebook Link' not found.");
+    if (emailIndex === -1) throw new Error("❌ Column 'Business Email' not found.");
 
-    const urls = [];
+    let urls = [];
+
     for (let i = 1; i < rows.length; i++) {
-        const fbLink = rows[i][fbIndex];
-        if (fbLink && fbLink.trim() !== "") urls.push({ row: i + 1, url: fbLink });
+        let fbLink = rows[i][fbIndex];
+        if (fbLink && fbLink.trim() !== "") {
+            urls.push({ row: i + 1, url: fbLink });
+        }
     }
-    console.log(`Loaded ${urls.length} Facebook links`);
-    return { urls, emailIndex };
-}
 
+    console.log(`📌 Loaded ${urls.length} Facebook links.`);
+    return { urls, fbIndex, emailIndex };
+}
 
 // ======================================================================
 // EMAIL REGEX
 // ======================================================================
 function extractEmail(text) {
-const regex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+.[a-zA-Z]{2,}/g;
-const found = text.match(regex);
-return found ? found[0] : "";
+    const regex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+    const found = text.match(regex);
+    return found ? found[0] : "";
 }
 
 // ======================================================================
-// SCRAPE FACEBOOK ABOUT SECTION FOR EMAIL
+// SCRAPE FACEBOOK
 // ======================================================================
 async function scrapeFacebookEmail(url, browser) {
-try {
-const page = await browser.newPage();
-await page.setUserAgent(
-"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
-);
-await page.setViewport({ width: 1200, height: 800 });
+    try {
+        const page = await browser.newPage();
 
-    console.log(`Visiting: ${url}`);
-    await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
+        await page.setUserAgent(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
+        );
 
-    const aboutSelector = 'a[href*="about"]';
-    await page.waitForSelector(aboutSelector, { timeout: 15000 });
-    await page.click(aboutSelector);
+        console.log(`🌐 Visiting: ${url}`);
+        await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
 
-    // Wait for dynamic content
-    await new Promise(r => setTimeout(r, 5000));
+        await new Promise(res => setTimeout(res, 4000));
 
-    const content = await page.evaluate(() => document.body.innerText);
-    const email = extractEmail(content);
-    await page.close();
-    return email;
-} catch (err) {
-    console.log(`Error scraping ${url}: ${err.message}`);
-    return "";
-}
+        const content = await page.content();
+        const email = extractEmail(content);
 
+        await page.close();
+        return email;
+
+    } catch (err) {
+        console.log(`⚠️ Error scraping ${url}: ${err.message}`);
+        return "";
+    }
 }
 
 // ======================================================================
 // COLUMN LETTER FUNCTION
 // ======================================================================
 function getColumnLetter(colNumber) {
-let temp = "";
-let letter = "";
-while (colNumber > 0) {
-temp = (colNumber - 1) % 26;
-letter = String.fromCharCode(temp + 65) + letter;
-colNumber = (colNumber - temp - 1) / 26;
-}
-return letter;
+    let temp = "";
+    let letter = "";
+    while (colNumber > 0) {
+        temp = (colNumber - 1) % 26;
+        letter = String.fromCharCode(temp + 65) + letter;
+        colNumber = (colNumber - temp - 1) / 26;
+    }
+    return letter;
 }
 
 // ======================================================================
-// BATCH WRITE EMAILS TO SHEET
+// WRITE TO SHEET → Business Email column
 // ======================================================================
-async function batchWriteEmails(results, emailIndex) {
-if (!results.length) return;
+async function writeEmailToSheet(row, email, emailIndex) {
+    const sheets = await getSheets();
 
-const sheets = await getSheets();
-const data = results.map(({ row, email }) => {
-    const colLetter = getColumnLetter(emailIndex + 1);
-    return {
-        range: `Sheet1!${colLetter}${row}`,
-        values: [[email]],
-    };
-});
+    const columnLetter = getColumnLetter(emailIndex + 1);
 
-await sheets.spreadsheets.values.batchUpdate({
-    spreadsheetId: SPREADSHEET_ID,
-    requestBody: {
+    await sheets.spreadsheets.values.update({
+        spreadsheetId: SPREADSHEET_ID,
+        range: `Sheet1!${columnLetter}${row}`,
         valueInputOption: "RAW",
-        data,
-    },
-});
+        requestBody: { values: [[email]] }
+    });
 
-console.log(`Batch updated ${results.length} rows successfully`);
-
+    console.log(`✅ Saved to Business Email (Row ${row}): ${email}`);
 }
 
 // ======================================================================
-// MAIN
+// MAIN — PARALLEL SCRAPING (7 AT A TIME)
 // ======================================================================
 async function main() {
-if (!SPREADSHEET_ID) {
-console.log("No spreadsheet ID provided. Use --sheet=ID");
-return;
+    console.log("🚀 Starting Facebook Email Scraper...");
+
+    const { urls, emailIndex } = await getFacebookLinks();
+
+    const browser = await puppeteerExtra.launch({
+        headless: true,
+        executablePath: puppeteer.executablePath(),
+        args: [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-blink-features=AutomationControlled"
+        ]
+    });
+
+    const limit = pLimit(7); // ⭐ run 7 at a time safely
+
+    const tasks = urls.map(entry =>
+        limit(async () => {
+            console.log(`\n🔎 Scraping row ${entry.row}: ${entry.url}`);
+
+            const email = await scrapeFacebookEmail(entry.url, browser);
+
+            if (email) {
+                console.log(`📧 Email Found: ${email}`);
+            } else {
+                console.log("❌ No email found");
+            }
+
+            await writeEmailToSheet(entry.row, email, emailIndex);
+
+            const wait = 2000 + Math.random() * 4000;
+            await new Promise(res => setTimeout(res, wait));
+        })
+    );
+
+    await Promise.all(tasks);
+
+    await browser.close();
+    console.log("\n🎉 DONE! All Facebook emails processed (Parallel & Zero Skipping).");
 }
 
-const { urls, emailIndex } = await getFacebookLinks();
-
-const browser = await puppeteerExtra.launch({
-    headless: true,
-    executablePath: puppeteer.executablePath(),
-    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-blink-features=AutomationControlled"]
-});
-
-const limit = pLimit(5); // concurrency for scraping
-const results = [];
-
-const tasks = urls.map(entry =>
-    limit(async () => {
-        console.log(`Scraping row ${entry.row}: ${entry.url}`);
-        const email = await scrapeFacebookEmail(entry.url, browser);
-        results.push({ row: entry.row, email });
-        if (email) console.log(`Found email: ${email}`);
-        else console.log("No email found");
-        await new Promise(r => setTimeout(r, 1000)); // small delay to avoid anti-bot
-    })
-);
-
-await Promise.all(tasks);
-await browser.close();
-
-// Batch update all emails at once
-await batchWriteEmails(results, emailIndex);
-
-console.log("All done!");
-
-}
-
+// RUN
 main();
