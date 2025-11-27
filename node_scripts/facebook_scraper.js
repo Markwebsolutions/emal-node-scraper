@@ -29,28 +29,31 @@ return google.sheets({ version: "v4", auth: client });
 // READ FACEBOOK LINKS
 // ======================================================================
 async function getFacebookLinks() {
-const sheets = await getSheets();
-const res = await sheets.spreadsheets.values.get({
-spreadsheetId: SPREADSHEET_ID,
-range: "Sheet1!A1",
-});
-const rows = res.data.values;
-const header = rows[0];
-const fbIndex = header.indexOf("Facebook Link");
-const emailIndex = header.indexOf("Business Email");
+    const sheets = await getSheets();
+    const res = await sheets.spreadsheets.values.get({
+        spreadsheetId: SPREADSHEET_ID,
+        range: "Sheet1!A1:Z5000", // Fetch enough rows and columns
+    });
+    const rows = res.data.values;
+    if (!rows || rows.length === 0) throw new Error("No data found in sheet");
 
-if (fbIndex === -1) throw new Error("Column 'Facebook Link' not found");
-if (emailIndex === -1) throw new Error("Column 'Business Email' not found");
+    // Normalize headers: trim spaces and lowercase
+    const header = rows[0].map(h => h.trim().toLowerCase());
+    const fbIndex = header.indexOf("facebook link");
+    const emailIndex = header.indexOf("business email");
 
-const urls = [];
-for (let i = 1; i < rows.length; i++) {
-    const fbLink = rows[i][fbIndex];
-    if (fbLink && fbLink.trim() !== "") urls.push({ row: i + 1, url: fbLink });
+    if (fbIndex === -1) throw new Error("Column 'Facebook Link' not found");
+    if (emailIndex === -1) throw new Error("Column 'Business Email' not found");
+
+    const urls = [];
+    for (let i = 1; i < rows.length; i++) {
+        const fbLink = rows[i][fbIndex];
+        if (fbLink && fbLink.trim() !== "") urls.push({ row: i + 1, url: fbLink });
+    }
+    console.log(`Loaded ${urls.length} Facebook links`);
+    return { urls, emailIndex };
 }
-console.log(`Loaded ${urls.length} Facebook links`);
-return { urls, emailIndex };
 
-}
 
 // ======================================================================
 // EMAIL REGEX
@@ -80,7 +83,7 @@ await page.setViewport({ width: 1200, height: 800 });
     await page.click(aboutSelector);
 
     // Wait for dynamic content
-    await new Promise(r => setTimeout(r, 40000));
+    await new Promise(r => setTimeout(r, 5000));
 
     const content = await page.evaluate(() => document.body.innerText);
     const email = extractEmail(content);
