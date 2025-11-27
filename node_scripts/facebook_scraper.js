@@ -84,7 +84,7 @@ async function scrapeFacebookEmail(url, browser) {
         await page.click(aboutSelector);
 
         // Wait for dynamic content to load
-        await new Promise(r => setTimeout(r, 4000)); // Works in any version
+        await new Promise(r => setTimeout(r, 40000)); // Works in any version
 
 
         // Get page content after About section loads
