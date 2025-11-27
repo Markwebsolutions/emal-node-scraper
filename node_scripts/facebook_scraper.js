@@ -10,7 +10,6 @@ const fs = require("fs");
 puppeteerExtra.use(stealth());
 const argv = minimist(process.argv.slice(2));
 
-// Normalize paths
 const SERVICE_JSON = argv.key ? path.resolve(argv.key) : path.join(__dirname, "service_account.json");
 const SPREADSHEET_ID = argv.sheet;
 
@@ -22,7 +21,7 @@ if (!SPREADSHEET_ID) {
     process.exit(1);
 }
 if (!fs.existsSync(SERVICE_JSON)) {
-    console.error("❌ service_account.json not found at", SERVICE_JSON);
+    console.error("❌ service_account.json not found:", SERVICE_JSON);
     process.exit(1);
 }
 
@@ -41,44 +40,39 @@ async function getFacebookLinks() {
         spreadsheetId: SPREADSHEET_ID,
         range: "Sheet1!A1:Z9999",
     });
+
     const rows = res.data.values || [];
     if (!rows.length) throw "Spreadsheet empty";
 
     const header = rows[0];
     const fbIndex = header.indexOf("Facebook Link");
     const emailIndex = header.indexOf("Business Email");
-    if (fbIndex === -1 || emailIndex === -1) throw "Columns missing";
+    const nameIndex = header.indexOf("Business Name");
 
-    const list = rows.slice(1).map((row, i) => {
-        const fb = row[fbIndex];
-        return fb && fb.trim() ? { row: i + 2, url: fb.trim() } : null;
-    }).filter(Boolean);
+    if (fbIndex === -1 || emailIndex === -1 || nameIndex === -1)
+        throw "❌ Required columns missing: Facebook Link, Business Email, Business Name";
 
-    console.log(`Found ${list.length} URLs`);
-    return { list, emailIndex };
+    const list = rows
+        .slice(1)
+        .map((row, i) => {
+            const fb = row[fbIndex];
+            const name = row[nameIndex] || "Unknown Business";
+
+            return fb ? { row: i + 2, url: fb.trim(), name } : null;
+        })
+        .filter(Boolean);
+
+    console.log(`📌 Total Facebook URLs Found: ${list.length}`);
+    return { list, fbIndex, emailIndex };
 }
 
-function extractEmail(text) {
-    const match = text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
-    return match ? match[0] : "";
+// ✔ extract ONLY mailto emails
+function extractEmail(html) {
+    const mailto = html.match(/mailto:([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+    return mailto ? mailto[1] : "";
 }
 
-async function scrapeFacebookEmail(url, browser) {
-    try {
-        const page = await browser.newPage();
-        await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
-        console.log(`Visiting → ${url}`);
-        await page.goto(url, { waitUntil: "networkidle2", timeout: 35000 });
-        await page.waitForTimeout(2500);
-        const html = await page.content();
-        await page.close();
-        return extractEmail(html);
-    } catch (err) {
-        console.log("Error:", err.message);
-        return "";
-    }
-}
-
+// Convert column number to letter (1 = A)
 function colLetter(n) {
     let s = "";
     while (n > 0) {
@@ -89,32 +83,68 @@ function colLetter(n) {
     return s;
 }
 
-async function writeEmail(row, email, emailIndex) {
+async function writeSingleCell(row, colIndex, value) {
     const sheets = await getSheets();
-    const col = colLetter(emailIndex + 1);
+    const col = colLetter(colIndex + 1);
     await sheets.spreadsheets.values.update({
         spreadsheetId: SPREADSHEET_ID,
         range: `Sheet1!${col}${row}`,
         valueInputOption: "RAW",
-        requestBody: { values: [[email]] },
+        requestBody: { values: [[value]] },
     });
-    console.log(`Saved ${email} → row ${row}`);
+}
+
+async function scrapeFacebookEmail(url, browser) {
+    try {
+        const page = await browser.newPage();
+        await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+        await page.goto(url, { waitUntil: "networkidle2", timeout: 35000 });
+
+        const html = await page.content();
+        await page.close();
+
+        return extractEmail(html);
+    } catch (err) {
+        console.log("❌ Error:", err.message);
+        return "";
+    }
 }
 
 (async () => {
-    console.log("🚀 FB Scraper Started");
-    const { list, emailIndex } = await getFacebookLinks();
+    console.log("🚀 Facebook Email Scraper Started");
+
+    const { list, fbIndex, emailIndex } = await getFacebookLinks();
+
     const browser = await puppeteerExtra.launch({
-        headless: "new",
-        args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+        headless: true,
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || puppeteer.executablePath(),
+        args: ["--no-sandbox", "--disable-dev-shm-usage"],
     });
+
     const limit = pLimit(3);
-    const tasks = list.map(item => limit(async () => {
-        const email = await scrapeFacebookEmail(item.url, browser);
-        await writeEmail(item.row, email, emailIndex);
-        await new Promise(r => setTimeout(r, 1000 + Math.random() * 1500));
-    }));
+
+    const tasks = list.map(item =>
+        limit(async () => {
+            console.log(`\n🔍 Scraping Business: ${item.name}`);
+            console.log(`🌐 Page: ${item.url}`);
+            console.log(`📄 Sheet Row: ${item.row}`);
+
+            const email = await scrapeFacebookEmail(item.url, browser);
+
+            if (email) {
+                console.log(`📧 Email Found → ${email}`);
+                await writeSingleCell(item.row, emailIndex, email);
+            } else {
+                console.log(`❌ Email NOT found → storing FB link back`);
+                await writeSingleCell(item.row, fbIndex, item.url);
+            }
+
+            console.log(`✅ Updated row ${item.row}\n`);
+        })
+    );
+
     await Promise.all(tasks);
     await browser.close();
-    console.log("🎉 Scraper Complete");
+
+    console.log("🎉 REAL-TIME Updates Complete!");
 })();
