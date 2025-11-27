@@ -1,3 +1,4 @@
+javascript
 // ======================================================================
 // IMPORTS
 // ======================================================================
@@ -37,7 +38,6 @@ async function getFacebookLinks() {
         spreadsheetId: SPREADSHEET_ID,
         range: "Sheet1!A1:Z5000",
     });
-
     const rows = res.data.values;
     const header = rows[0];
     const fbIndex = header.indexOf("Facebook Link");
@@ -65,7 +65,7 @@ function extractEmail(text) {
 }
 
 // ======================================================================
-// SCRAPE FACEBOOK
+// SCRAPE FACEBOOK ABOUT SECTION FOR EMAIL
 // ======================================================================
 async function scrapeFacebookEmail(url, browser) {
     try {
@@ -73,10 +73,22 @@ async function scrapeFacebookEmail(url, browser) {
         await page.setUserAgent(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36"
         );
+        await page.setViewport({ width: 1200, height: 800 });
+
         console.log(`Visiting: ${url}`);
         await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
-        await new Promise(res => setTimeout(res, 4000));
-        const content = await page.content();
+
+        // Wait for About section link (may vary depending on Facebook layout)
+        const aboutSelector = 'a[href*="about"]';
+        await page.waitForSelector(aboutSelector, { timeout: 15000 });
+        await page.click(aboutSelector);
+
+        // Wait for dynamic content to load
+        await page.waitForTimeout(4000);
+
+        // Get page content after About section loads
+        const content = await page.evaluate(() => document.body.innerText);
+
         const email = extractEmail(content);
         await page.close();
         return email;
@@ -106,14 +118,12 @@ function getColumnLetter(colNumber) {
 async function writeEmailToSheet(row, email, emailIndex) {
     const sheets = await getSheets();
     const columnLetter = getColumnLetter(emailIndex + 1);
-
     await sheets.spreadsheets.values.update({
         spreadsheetId: SPREADSHEET_ID,
         range: `Sheet1!${columnLetter}${row}`,
         valueInputOption: "RAW",
         requestBody: { values: [[email]] }
     });
-
     console.log(`Saved to row ${row}: ${email}`);
 }
 
@@ -134,7 +144,8 @@ async function main() {
         args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-blink-features=AutomationControlled"]
     });
 
-    const limit = pLimit(7);
+    const limit = pLimit(5); // Rate limiting concurrency to 5
+
     const tasks = urls.map(entry =>
         limit(async () => {
             console.log(`Scraping row ${entry.row}: ${entry.url}`);
@@ -142,7 +153,7 @@ async function main() {
             if (email) console.log(`Found email: ${email}`);
             else console.log("No email found");
             await writeEmailToSheet(entry.row, email, emailIndex);
-            await new Promise(res => setTimeout(res, 2000 + Math.random() * 4000));
+            await new Promise(res => setTimeout(res, 2000 + Math.random() * 3000)); // random delay to prevent rate limiting
         })
     );
 
@@ -152,3 +163,4 @@ async function main() {
 }
 
 main();
+
