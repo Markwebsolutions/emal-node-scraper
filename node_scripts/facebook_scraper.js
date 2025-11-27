@@ -1,5 +1,8 @@
-const SERVICE_JSON = argv.key || "service_account.json";
+
 const SPREADSHEET_ID = argv.sheet || "";
+const SERVICE_JSON = argv.key || "service_account.json";
+const argv = require("minimist")(process.argv.slice(2));
+
 
 // ======================================================================
 // IMPORTS
@@ -17,7 +20,7 @@ puppeteerExtra.use(stealth());
 // ======================================================================
 async function getSheets() {
     const auth = new google.auth.GoogleAuth({
-        keyFile: argv.key || "service_account.json",
+        keyFile: SERVICE_JSON,
         scopes: ["https://www.googleapis.com/auth/spreadsheets"]
     });
 
