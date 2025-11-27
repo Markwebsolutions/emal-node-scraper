@@ -151,7 +151,7 @@ async function scrapeFacebookEmail(url, browser) {
 }
 
 // ======================================================================
-// MAIN — EXACT behaviour of your simple script
+// MAIN — Scrape then batch update
 // ======================================================================
 (async () => {
     console.log("🚀 Starting Facebook Email Scraper…");
@@ -171,6 +171,9 @@ async function scrapeFacebookEmail(url, browser) {
 
     const limit = pLimit(7);
 
+    // Store emails to write at the end
+    const emailResults = [];
+
     const tasks = list.map(item =>
         limit(async () => {
             console.log(`\n🔹 Business: ${item.name}`);
@@ -184,7 +187,8 @@ async function scrapeFacebookEmail(url, browser) {
                 console.log("❌ No email found");
             }
 
-            await writeEmailToSheet(item.row, email, emailIndex);
+            // Push to results array
+            emailResults.push({ row: item.row, email });
 
             await new Promise(res =>
                 setTimeout(res, 2000 + Math.random() * 4000)
@@ -194,6 +198,22 @@ async function scrapeFacebookEmail(url, browser) {
 
     await Promise.all(tasks);
 
+    // BATCH UPDATE TO SHEET
+    if (emailResults.length) {
+        const sheets = await getSheets();
+
+        for (const item of emailResults) {
+            const col = columnLetter(emailIndex + 1);
+            await sheets.spreadsheets.values.update({
+                spreadsheetId: SPREADSHEET_ID,
+                range: `Sheet1!${col}${item.row}`,
+                valueInputOption: "RAW",
+                requestBody: { values: [[item.email]] },
+            });
+            console.log(`✅ Saved Business Email (Row ${item.row}): ${item.email}`);
+        }
+    }
+
     await browser.close();
-    console.log("\n🎉 DONE — Emails Updated Row-by-Row (no batch, exact behaviour).");
+    console.log("\n🎉 DONE — All emails updated in batch!");
 })();
