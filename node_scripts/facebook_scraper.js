@@ -1,7 +1,8 @@
+const argv = require("minimist")(process.argv.slice(2));
 
 const SPREADSHEET_ID = argv.sheet || "";
 const SERVICE_JSON = argv.key || "service_account.json";
-const argv = require("minimist")(process.argv.slice(2));
+
 
 
 // ======================================================================
